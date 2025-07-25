@@ -8,17 +8,38 @@
 #include <rmw_microros/rmw_microros.h>
 
 #include "pico/stdlib.h"
+#include "hardware/pwm.h"
 #include "pico_uart_transports.h"
 
 const uint LED_PIN = 25;
+const uint PWM_PIN = 16; // GPIO pin for PWM output
 
-rcl_publisher_t publisher;
+rcl_subscription_t subscriber;
 std_msgs__msg__Int32 msg;
 
-void timer_callback(rcl_timer_t *timer, int64_t last_call_time)
+// PWM configuration
+uint slice_num;
+uint channel;
+
+void subscription_callback(const void * msgin)
 {
-    rcl_ret_t ret = rcl_publish(&publisher, &msg, NULL);
-    msg.data++;
+    const std_msgs__msg__Int32 * msg_in = (const std_msgs__msg__Int32 *)msgin;
+    
+    // Constrain PWM value to valid range (0-100 for percentage)
+    int32_t pwm_value = msg_in->data;
+    if (pwm_value < 0) pwm_value = 0;
+    if (pwm_value > 100) pwm_value = 100;
+    
+    // Convert percentage to PWM level (0-65535 for 16-bit PWM)
+    uint16_t pwm_level = (uint16_t)((pwm_value * 65535) / 100);
+    
+    // Set PWM duty cycle
+    pwm_set_chan_level(slice_num, channel, pwm_level);
+    
+    // Toggle LED to indicate message received
+    static bool led_state = false;
+    led_state = !led_state;
+    gpio_put(LED_PIN, led_state);
 }
 
 int main()
@@ -32,10 +53,23 @@ int main()
 		pico_serial_transport_read
 	);
 
+    // Initialize LED
     gpio_init(LED_PIN);
     gpio_set_dir(LED_PIN, GPIO_OUT);
+    
+    // Initialize PWM
+    gpio_set_function(PWM_PIN, GPIO_FUNC_PWM);
+    slice_num = pwm_gpio_to_slice_num(PWM_PIN);
+    channel = pwm_gpio_to_channel(PWM_PIN);
+    
+    // Set PWM frequency to 1 kHz (adjust as needed)
+    pwm_set_clkdiv(slice_num, 125.0f);  // 125 MHz / 125 = 1 MHz base frequency
+    pwm_set_wrap(slice_num, 999);       // 1 MHz / 1000 = 1 kHz PWM frequency
+    
+    // Start PWM with 0% duty cycle
+    pwm_set_chan_level(slice_num, channel, 0);
+    pwm_set_enabled(slice_num, true);
 
-    rcl_timer_t timer;
     rcl_node_t node;
     rcl_allocator_t allocator;
     rclc_support_t support;
@@ -58,24 +92,19 @@ int main()
     rclc_support_init(&support, 0, NULL, &allocator);
 
     rclc_node_init_default(&node, "pico_node", "", &support);
-    rclc_publisher_init_default(
-        &publisher,
+    
+    // Initialize subscriber for PWM control
+    rclc_subscription_init_default(
+        &subscriber,
         &node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
-        "pico_publisher");
-
-    rclc_timer_init_default(
-        &timer,
-        &support,
-        RCL_MS_TO_NS(1000),
-        timer_callback);
+        "pwm_control");
 
     rclc_executor_init(&executor, &support.context, 1, &allocator);
-    rclc_executor_add_timer(&executor, &timer);
+    rclc_executor_add_subscription(&executor, &subscriber, &msg, &subscription_callback, ON_NEW_DATA);
 
     gpio_put(LED_PIN, 1);
 
-    msg.data = 0;
     while (true)
     {
         rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100));
