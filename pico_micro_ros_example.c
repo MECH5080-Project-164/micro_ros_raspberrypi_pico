@@ -14,6 +14,9 @@
 const uint LED_PIN = 25;
 const uint PWM_PIN = 16; // GPIO pin for PWM output
 
+// Timeout configuration
+const uint32_t PWM_TIMEOUT_MS = 5000; // 5 seconds timeout (configurable)
+
 rcl_subscription_t subscriber;
 std_msgs__msg__Int32 msg;
 
@@ -21,9 +24,15 @@ std_msgs__msg__Int32 msg;
 uint slice_num;
 uint channel;
 
+// Timeout tracking
+volatile uint32_t last_message_time_ms = 0;
+
 void subscription_callback(const void * msgin)
 {
     const std_msgs__msg__Int32 * msg_in = (const std_msgs__msg__Int32 *)msgin;
+    
+    // Update last message time
+    last_message_time_ms = to_ms_since_boot(get_absolute_time());
     
     // Constrain PWM value to valid range (0-100 for percentage)
     int32_t pwm_value = msg_in->data;
@@ -62,13 +71,16 @@ int main()
     slice_num = pwm_gpio_to_slice_num(PWM_PIN);
     channel = pwm_gpio_to_channel(PWM_PIN);
     
-    // Set PWM frequency to 1 kHz (adjust as needed)
+    // Set PWM frequency to 30 Hz (adjust as needed)
     pwm_set_clkdiv(slice_num, 125.0f);  // 125 MHz / 125 = 1 MHz base frequency
-    pwm_set_wrap(slice_num, 999);       // 1 MHz / 1000 = 1 kHz PWM frequency
+    pwm_set_wrap(slice_num, 33333);     // 1 MHz / 33334 ≈ 30 Hz PWM frequency
     
     // Start PWM with 0% duty cycle
     pwm_set_chan_level(slice_num, channel, 0);
     pwm_set_enabled(slice_num, true);
+
+    // Initialize timeout tracking
+    last_message_time_ms = to_ms_since_boot(get_absolute_time());
 
     rcl_node_t node;
     rcl_allocator_t allocator;
@@ -77,17 +89,22 @@ int main()
 
     allocator = rcl_get_default_allocator();
 
-    // Wait for agent successful ping for 2 minutes.
+    // Keep trying to connect to agent indefinitely
     const int timeout_ms = 1000; 
-    const uint8_t attempts = 120;
+    const uint8_t attempts_per_cycle = 1; // Try 1 time per cycle
 
-    rcl_ret_t ret = rmw_uros_ping_agent(timeout_ms, attempts);
-
-    if (ret != RCL_RET_OK)
-    {
-        // Unreachable agent, exiting program.
-        return ret;
-    }
+    rcl_ret_t ret;
+    do {
+        ret = rmw_uros_ping_agent(timeout_ms, attempts_per_cycle);
+        if (ret != RCL_RET_OK)
+        {
+            // Flash LED to indicate connection attempt
+            gpio_put(LED_PIN, 1);
+            sleep_ms(100);
+            gpio_put(LED_PIN, 0);
+            sleep_ms(100);
+        }
+    } while (ret != RCL_RET_OK);
 
     rclc_support_init(&support, 0, NULL, &allocator);
 
@@ -98,7 +115,8 @@ int main()
         &subscriber,
         &node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
-        "pwm_control");
+        "pump_pwm_control"
+    );
 
     rclc_executor_init(&executor, &support.context, 1, &allocator);
     rclc_executor_add_subscription(&executor, &subscriber, &msg, &subscription_callback, ON_NEW_DATA);
@@ -108,6 +126,13 @@ int main()
     while (true)
     {
         rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100));
+        
+        // Check for timeout and set PWM to 0% if no recent messages
+        uint32_t current_time_ms = to_ms_since_boot(get_absolute_time());
+        if ((current_time_ms - last_message_time_ms) > PWM_TIMEOUT_MS)
+        {
+            pwm_set_chan_level(slice_num, channel, 0);
+        }
     }
     return 0;
 }
