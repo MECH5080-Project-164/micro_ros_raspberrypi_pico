@@ -125,7 +125,50 @@ int main()
 
     while (true)
     {
-        rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100));
+        rcl_ret_t spin_ret = rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100));
+        
+        // Check if agent disconnected
+        if (spin_ret != RCL_RET_OK)
+        {
+            // Agent disconnected, cleanup and restart
+            rclc_executor_fini(&executor);
+            rcl_subscription_fini(&subscriber, &node);
+            rcl_node_fini(&node);
+            rclc_support_fini(&support);
+            
+            // Reset PWM to 0% for safety
+            pwm_set_chan_level(slice_num, channel, 0);
+            
+            // Start reconnection process
+            do {
+                ret = rmw_uros_ping_agent(timeout_ms, attempts_per_cycle);
+                if (ret != RCL_RET_OK)
+                {
+                    // Flash LED to indicate connection attempt
+                    gpio_put(LED_PIN, 1);
+                    sleep_ms(100);
+                    gpio_put(LED_PIN, 0);
+                    sleep_ms(100);
+                }
+            } while (ret != RCL_RET_OK);
+            
+            // Reinitialize everything
+            rclc_support_init(&support, 0, NULL, &allocator);
+            rclc_node_init_default(&node, "pico_node", "", &support);
+            rclc_subscription_init_default(
+                &subscriber,
+                &node,
+                ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
+                "pump_pwm_control"
+            );
+            rclc_executor_init(&executor, &support.context, 1, &allocator);
+            rclc_executor_add_subscription(&executor, &subscriber, &msg, &subscription_callback, ON_NEW_DATA);
+            
+            // Reset timeout tracking
+            last_message_time_ms = to_ms_since_boot(get_absolute_time());
+            gpio_put(LED_PIN, 1);
+            continue;
+        }
         
         // Check for timeout and set PWM to 0% if no recent messages
         uint32_t current_time_ms = to_ms_since_boot(get_absolute_time());
