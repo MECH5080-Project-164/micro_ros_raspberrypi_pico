@@ -1,21 +1,26 @@
 #include <stdio.h>
+#include <string.h>
 
 #include <rcl/rcl.h>
 #include <rcl/error_handling.h>
 #include <rclc/rclc.h>
 #include <rclc/executor.h>
 #include <std_msgs/msg/int32.h>
+#include <std_msgs/msg/float32.h>
 #include <rmw_microros/rmw_microros.h>
 
 #include "pico/stdlib.h"
 #include "hardware/pwm.h"
 #include "pico_uart_transports.h"
+#include "ds18b20.h"
 
 const uint LED_PIN = 25;
 const uint PWM_PIN = 16; // GPIO pin for PWM output
+const uint DS18B20_PIN = 18; // GPIO pin for DS18B20 1-Wire bus
 
 // Timeout configuration
-const uint32_t PWM_TIMEOUT_MS = 5000; // 5 seconds timeout (configurable)
+const uint32_t PWM_TIMEOUT_MS = 1000; // 1 seconds timeout (configurable)
+const uint32_t TEMP_PUBLISH_INTERVAL_MS = 5000; // 5 seconds between temperature readings
 
 rcl_subscription_t subscriber;
 std_msgs__msg__Int32 msg;
@@ -26,6 +31,40 @@ uint channel;
 
 // Timeout tracking
 volatile uint32_t last_message_time_ms = 0;
+
+// DS18B20 configuration
+ds18b20_bus_t temp_bus;
+rcl_publisher_t temp_publishers[MAX_DS18B20_SENSORS];
+std_msgs__msg__Float32 temp_msgs[MAX_DS18B20_SENSORS];
+char temp_topic_names[MAX_DS18B20_SENSORS][64];
+uint32_t last_temp_publish_time_ms = 0;
+
+// Sensor name mappings - Add your sensor ROM IDs and friendly names here
+typedef struct {
+    char rom_id[17];        // 16 hex chars + null terminator
+    char friendly_name[32]; // Friendly name for the sensor
+} sensor_mapping_t;
+
+// Define your sensor mappings here - replace with your actual ROM IDs
+static const sensor_mapping_t sensor_mappings[] = {
+    {"28FF64AC31180354", "kitchen_temp"},
+    {"28FF12BC45670891", "outdoor_temp"},
+    {"28FFABC123456789", "basement_temp"},
+    {"28FF9876543210AB", "attic_temp"},
+    // Add more mappings as needed
+};
+
+static const uint8_t num_sensor_mappings = sizeof(sensor_mappings) / sizeof(sensor_mappings[0]);
+
+// Function to get friendly name for a ROM ID
+const char* get_sensor_friendly_name(const char* rom_id) {
+    for (uint8_t i = 0; i < num_sensor_mappings; i++) {
+        if (strcmp(rom_id, sensor_mappings[i].rom_id) == 0) {
+            return sensor_mappings[i].friendly_name;
+        }
+    }
+    return NULL; // No mapping found
+}
 
 void subscription_callback(const void * msgin)
 {
@@ -79,8 +118,13 @@ int main()
     pwm_set_chan_level(slice_num, channel, 0);
     pwm_set_enabled(slice_num, true);
 
+    // Initialize DS18B20 temperature sensors
+    ds18b20_init(&temp_bus, DS18B20_PIN);
+    uint8_t sensor_count = ds18b20_scan_sensors(&temp_bus);
+    
     // Initialize timeout tracking
     last_message_time_ms = to_ms_since_boot(get_absolute_time());
+    last_temp_publish_time_ms = to_ms_since_boot(get_absolute_time());
 
     rcl_node_t node;
     rcl_allocator_t allocator;
@@ -118,6 +162,30 @@ int main()
         "pump_pwm_control"
     );
 
+    // Initialize temperature publishers for each DS18B20 sensor
+    for (uint8_t i = 0; i < sensor_count; i++) {
+        char rom_str[17];
+        ds18b20_rom_to_string(temp_bus.sensors[i].rom, rom_str, sizeof(rom_str));
+        
+        // Check if we have a friendly name mapping for this sensor
+        const char* friendly_name = get_sensor_friendly_name(rom_str);
+        
+        if (friendly_name != NULL) {
+            // Use friendly name
+            snprintf(temp_topic_names[i], sizeof(temp_topic_names[i]), "temperature/%s", friendly_name);
+        } else {
+            // Use ROM ID as fallback
+            snprintf(temp_topic_names[i], sizeof(temp_topic_names[i]), "temperature/sensor_%s", rom_str);
+        }
+        
+        rclc_publisher_init_default(
+            &temp_publishers[i],
+            &node,
+            ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+            temp_topic_names[i]
+        );
+    }
+
     rclc_executor_init(&executor, &support.context, 1, &allocator);
     rclc_executor_add_subscription(&executor, &subscriber, &msg, &subscription_callback, ON_NEW_DATA);
 
@@ -133,6 +201,14 @@ int main()
             // Agent disconnected, cleanup and restart
             rclc_executor_fini(&executor);
             rcl_subscription_fini(&subscriber, &node);
+            
+            // Cleanup temperature publishers
+            for (uint8_t i = 0; i < sensor_count; i++) {
+                if (temp_bus.sensors[i].valid) {
+                    rcl_publisher_fini(&temp_publishers[i], &node);
+                }
+            }
+            
             rcl_node_fini(&node);
             rclc_support_fini(&support);
             
@@ -161,11 +237,25 @@ int main()
                 ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
                 "pump_pwm_control"
             );
+            
+            // Reinitialize temperature publishers
+            for (uint8_t i = 0; i < sensor_count; i++) {
+                if (temp_bus.sensors[i].valid) {
+                    rclc_publisher_init_default(
+                        &temp_publishers[i],
+                        &node,
+                        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+                        temp_topic_names[i]
+                    );
+                }
+            }
+            
             rclc_executor_init(&executor, &support.context, 1, &allocator);
             rclc_executor_add_subscription(&executor, &subscriber, &msg, &subscription_callback, ON_NEW_DATA);
             
             // Reset timeout tracking
             last_message_time_ms = to_ms_since_boot(get_absolute_time());
+            last_temp_publish_time_ms = to_ms_since_boot(get_absolute_time());
             gpio_put(LED_PIN, 1);
             continue;
         }
@@ -175,6 +265,27 @@ int main()
         if ((current_time_ms - last_message_time_ms) > PWM_TIMEOUT_MS)
         {
             pwm_set_chan_level(slice_num, channel, 0);
+        }
+        
+        // Publish temperature readings at regular intervals
+        if ((current_time_ms - last_temp_publish_time_ms) > TEMP_PUBLISH_INTERVAL_MS)
+        {
+            for (uint8_t i = 0; i < sensor_count; i++) {
+                if (temp_bus.sensors[i].valid) {
+                    // Start temperature conversion
+                    ds18b20_start_conversion(&temp_bus, temp_bus.sensors[i].rom);
+                    sleep_ms(750); // Wait for conversion (12-bit resolution)
+                    
+                    // Read temperature
+                    float temperature = ds18b20_read_temperature(&temp_bus, temp_bus.sensors[i].rom);
+                    
+                    if (temperature != -999.0f) {
+                        temp_msgs[i].data = temperature;
+                        rcl_publish(&temp_publishers[i], &temp_msgs[i], NULL);
+                    }
+                }
+            }
+            last_temp_publish_time_ms = current_time_ms;
         }
     }
     return 0;
