@@ -13,6 +13,7 @@
 #include "hardware/pwm.h"
 #include "pico_uart_transports.h"
 #include "ds18b20.h"
+#include "pico/bootrom.h"
 
 const uint LED_PIN = 25;
 const uint PWM_PIN = 16; // GPIO pin for PWM output
@@ -31,6 +32,11 @@ uint channel;
 
 // Timeout tracking
 volatile uint32_t last_message_time_ms = 0;
+
+// Software reset function
+void reset_to_bootloader() {
+    reset_usb_boot(0, 0);
+}
 
 // DS18B20 configuration
 ds18b20_bus_t temp_bus;
@@ -77,6 +83,15 @@ void subscription_callback(const void * msgin)
     
     // Constrain PWM value to valid range (0-100 for percentage)
     int32_t pwm_value = msg_in->data;
+    
+    // Special reset command: PWM value of 999 triggers bootloader reset
+    if (pwm_value == 999) {
+        printf("Reset command received, entering bootloader mode...\n");
+        sleep_ms(100); // Give time for message to be sent
+        reset_to_bootloader();
+        return; // Should never reach here
+    }
+    
     if (pwm_value < 0) pwm_value = 0;
     if (pwm_value > 100) pwm_value = 100;
     
