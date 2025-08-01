@@ -38,6 +38,8 @@ rcl_publisher_t temp_publishers[MAX_DS18B20_SENSORS];
 std_msgs__msg__Float32 temp_msgs[MAX_DS18B20_SENSORS];
 char temp_topic_names[MAX_DS18B20_SENSORS][64];
 uint32_t last_temp_publish_time_ms = 0;
+uint32_t last_temp_conversion_start_ms = 0;
+bool temp_conversion_in_progress = false;
 
 // Sensor name mappings - Add your sensor ROM IDs and friendly names here
 typedef struct {
@@ -120,11 +122,22 @@ int main()
 
     // Initialize DS18B20 temperature sensors
     ds18b20_init(&temp_bus, DS18B20_PIN);
+    printf("DS18B20: Scanning for sensors on GPIO %d...\n", DS18B20_PIN);
     uint8_t sensor_count = ds18b20_scan_sensors(&temp_bus);
+    printf("DS18B20: Found %d sensors\n", sensor_count);
+    
+    // Print ROM IDs of found sensors
+    for (uint8_t i = 0; i < sensor_count; i++) {
+        char rom_str[17];
+        ds18b20_rom_to_string(temp_bus.sensors[i].rom, rom_str, sizeof(rom_str));
+        printf("DS18B20: Sensor %d ROM ID: %s\n", i, rom_str);
+    }
     
     // Initialize timeout tracking
     last_message_time_ms = to_ms_since_boot(get_absolute_time());
     last_temp_publish_time_ms = to_ms_since_boot(get_absolute_time());
+    last_temp_conversion_start_ms = 0;
+    temp_conversion_in_progress = false;
 
     rcl_node_t node;
     rcl_allocator_t allocator;
@@ -163,6 +176,7 @@ int main()
     );
 
     // Initialize temperature publishers for each DS18B20 sensor
+    printf("DS18B20: Initializing publishers...\n");
     for (uint8_t i = 0; i < sensor_count; i++) {
         char rom_str[17];
         ds18b20_rom_to_string(temp_bus.sensors[i].rom, rom_str, sizeof(rom_str));
@@ -173,18 +187,27 @@ int main()
         if (friendly_name != NULL) {
             // Use friendly name
             snprintf(temp_topic_names[i], sizeof(temp_topic_names[i]), "temperature/%s", friendly_name);
+            printf("DS18B20: Sensor %d (%s) -> Topic: %s\n", i, rom_str, temp_topic_names[i]);
         } else {
             // Use ROM ID as fallback
             snprintf(temp_topic_names[i], sizeof(temp_topic_names[i]), "temperature/sensor_%s", rom_str);
+            printf("DS18B20: Sensor %d (%s) -> Topic: %s (no mapping)\n", i, rom_str, temp_topic_names[i]);
         }
         
-        rclc_publisher_init_default(
+        rcl_ret_t pub_ret = rclc_publisher_init_default(
             &temp_publishers[i],
             &node,
             ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
             temp_topic_names[i]
         );
+        
+        if (pub_ret == RCL_RET_OK) {
+            printf("DS18B20: Publisher %d initialized successfully\n", i);
+        } else {
+            printf("DS18B20: Failed to initialize publisher %d (error: %d)\n", i, pub_ret);
+        }
     }
+    printf("DS18B20: Publisher initialization complete\n");
 
     rclc_executor_init(&executor, &support.context, 1, &allocator);
     rclc_executor_add_subscription(&executor, &subscriber, &msg, &subscription_callback, ON_NEW_DATA);
@@ -256,6 +279,8 @@ int main()
             // Reset timeout tracking
             last_message_time_ms = to_ms_since_boot(get_absolute_time());
             last_temp_publish_time_ms = to_ms_since_boot(get_absolute_time());
+            last_temp_conversion_start_ms = 0;
+            temp_conversion_in_progress = false;
             gpio_put(LED_PIN, 1);
             continue;
         }
@@ -270,22 +295,37 @@ int main()
         // Publish temperature readings at regular intervals
         if ((current_time_ms - last_temp_publish_time_ms) > TEMP_PUBLISH_INTERVAL_MS)
         {
-            for (uint8_t i = 0; i < sensor_count; i++) {
-                if (temp_bus.sensors[i].valid) {
-                    // Start temperature conversion
-                    ds18b20_start_conversion(&temp_bus, temp_bus.sensors[i].rom);
-                    sleep_ms(750); // Wait for conversion (12-bit resolution)
-                    
-                    // Read temperature
-                    float temperature = ds18b20_read_temperature(&temp_bus, temp_bus.sensors[i].rom);
-                    
-                    if (temperature != -999.0f) {
-                        temp_msgs[i].data = temperature;
-                        rcl_publish(&temp_publishers[i], &temp_msgs[i], NULL);
+            if (!temp_conversion_in_progress) {
+                // Start conversion for all sensors simultaneously
+                printf("DS18B20: Starting temperature conversion for %d sensors\n", sensor_count);
+                for (uint8_t i = 0; i < sensor_count; i++) {
+                    if (temp_bus.sensors[i].valid) {
+                        ds18b20_start_conversion(&temp_bus, NULL); // NULL = all sensors at once
+                        break; // Only need to send command once for all sensors
                     }
                 }
+                temp_conversion_in_progress = true;
+                last_temp_conversion_start_ms = current_time_ms;
+            } else if ((current_time_ms - last_temp_conversion_start_ms) >= 750) {
+                // Conversion should be complete, read all sensors
+                printf("DS18B20: Reading temperatures and publishing...\n");
+                for (uint8_t i = 0; i < sensor_count; i++) {
+                    if (temp_bus.sensors[i].valid) {
+                        float temperature = ds18b20_read_temperature(&temp_bus, temp_bus.sensors[i].rom);
+                        
+                        if (temperature != -999.0f) {
+                            temp_msgs[i].data = temperature;
+                            rcl_ret_t pub_ret = rcl_publish(&temp_publishers[i], &temp_msgs[i], NULL);
+                            printf("DS18B20: Sensor %d: %.2f°C published to %s (ret: %d)\n", 
+                                   i, temperature, temp_topic_names[i], pub_ret);
+                        } else {
+                            printf("DS18B20: Sensor %d: Failed to read temperature\n", i);
+                        }
+                    }
+                }
+                temp_conversion_in_progress = false;
+                last_temp_publish_time_ms = current_time_ms;
             }
-            last_temp_publish_time_ms = current_time_ms;
         }
     }
     return 0;
