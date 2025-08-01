@@ -175,6 +175,7 @@ int main()
             sleep_ms(100);
             gpio_put(LED_PIN, 0);
             sleep_ms(100);
+            printf("Waiting for agent connection...\n");
         }
     } while (ret != RCL_RET_OK);
 
