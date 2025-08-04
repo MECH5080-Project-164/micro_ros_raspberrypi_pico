@@ -22,7 +22,7 @@ const uint DS18B20_PIN = 18; // GPIO pin for DS18B20 1-Wire bus
 
 // Timeout configuration
 const uint32_t PWM_TIMEOUT_MS = 1000; // 1 seconds timeout (configurable)
-const uint32_t TEMP_PUBLISH_INTERVAL_MS = 5000; // 5 seconds between temperature readings
+const uint32_t TEMP_PUBLISH_INTERVAL_MS = 1000; // 1 seconds between temperature readings
 
 rcl_subscription_t subscriber;
 std_msgs__msg__Int32 msg;
