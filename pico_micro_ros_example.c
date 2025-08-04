@@ -96,7 +96,9 @@ void subscription_callback(const void * msgin)
     // Constrain PWM value to valid range (0-100 for percentage)
     int32_t pwm_value = msg_in->data;
     
-    // Special reset command: PWM value of 999 triggers bootloader reset
+    // Special reset command: PWM value of 999 triggers bootloader reset:
+    // ros2 topic pub /pump_pwm_control std_msgs/msg/Int32 'data: 999' -1
+
     if (pwm_value == 999) {
         publish_log("Reset command received, entering bootloader mode...");
         sleep_ms(100); // Give time for message to be sent
@@ -124,10 +126,10 @@ int main()
     rmw_uros_set_custom_transport(
 		true,
 		NULL,
-		pico_serial_transport_open,
-		pico_serial_transport_close,
-		pico_serial_transport_write,
-		pico_serial_transport_read
+		pico_uart_transport_open,
+		pico_uart_transport_close,
+		pico_uart_transport_write,
+		pico_uart_transport_read
 	);
 
     // Initialize LED
