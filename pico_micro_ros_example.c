@@ -7,6 +7,7 @@
 #include <rclc/executor.h>
 #include <std_msgs/msg/int32.h>
 #include <std_msgs/msg/float32.h>
+#include <std_msgs/msg/string.h>
 #include <rmw_microros/rmw_microros.h>
 
 #include "pico/stdlib.h"
@@ -25,6 +26,11 @@ const uint32_t TEMP_PUBLISH_INTERVAL_MS = 5000; // 5 seconds between temperature
 
 rcl_subscription_t subscriber;
 std_msgs__msg__Int32 msg;
+
+// Logging publisher
+rcl_publisher_t log_publisher;
+std_msgs__msg__String log_msg;
+char log_buffer[256];
 
 // PWM configuration
 uint slice_num;
@@ -64,6 +70,15 @@ static const sensor_mapping_t sensor_mappings[] = {
 
 static const uint8_t num_sensor_mappings = sizeof(sensor_mappings) / sizeof(sensor_mappings[0]);
 
+// Logging function
+void publish_log(const char* message) {
+    snprintf(log_buffer, sizeof(log_buffer), "%s", message);
+    log_msg.data.data = log_buffer;
+    log_msg.data.size = strlen(log_buffer);
+    log_msg.data.capacity = sizeof(log_buffer);
+    rcl_publish(&log_publisher, &log_msg, NULL);
+}
+
 // Function to get friendly name for a ROM ID
 const char* get_sensor_friendly_name(const char* rom_id) {
     for (uint8_t i = 0; i < num_sensor_mappings; i++) {
@@ -86,7 +101,7 @@ void subscription_callback(const void * msgin)
     
     // Special reset command: PWM value of 999 triggers bootloader reset
     if (pwm_value == 999) {
-        printf("Reset command received, entering bootloader mode...\n");
+        publish_log("Reset command received, entering bootloader mode...");
         sleep_ms(100); // Give time for message to be sent
         reset_to_bootloader();
         return; // Should never reach here
@@ -137,16 +152,7 @@ int main()
 
     // Initialize DS18B20 temperature sensors
     ds18b20_init(&temp_bus, DS18B20_PIN);
-    printf("DS18B20: Scanning for sensors on GPIO %d...\n", DS18B20_PIN);
     uint8_t sensor_count = ds18b20_scan_sensors(&temp_bus);
-    printf("DS18B20: Found %d sensors\n", sensor_count);
-    
-    // Print ROM IDs of found sensors
-    for (uint8_t i = 0; i < sensor_count; i++) {
-        char rom_str[17];
-        ds18b20_rom_to_string(temp_bus.sensors[i].rom, rom_str, sizeof(rom_str));
-        printf("DS18B20: Sensor %d ROM ID: %s\n", i, rom_str);
-    }
     
     // Initialize timeout tracking
     last_message_time_ms = to_ms_since_boot(get_absolute_time());
@@ -175,13 +181,20 @@ int main()
             sleep_ms(100);
             gpio_put(LED_PIN, 0);
             sleep_ms(100);
-            printf("Waiting for agent connection...\n");
         }
     } while (ret != RCL_RET_OK);
 
     rclc_support_init(&support, 0, NULL, &allocator);
 
     rclc_node_init_default(&node, "pico_node", "", &support);
+    
+    // Initialize logging publisher
+    rclc_publisher_init_default(
+        &log_publisher,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
+        "pico_logs"
+    );
     
     // Initialize subscriber for PWM control
     rclc_subscription_init_default(
@@ -192,10 +205,18 @@ int main()
     );
 
     // Initialize temperature publishers for each DS18B20 sensor
-    printf("DS18B20: Initializing publishers...\n");
+    char startup_msg[128];
+    snprintf(startup_msg, sizeof(startup_msg), "DS18B20: Found %d sensors on GPIO %d", sensor_count, DS18B20_PIN);
+    publish_log(startup_msg);
+    
     for (uint8_t i = 0; i < sensor_count; i++) {
         char rom_str[17];
         ds18b20_rom_to_string(temp_bus.sensors[i].rom, rom_str, sizeof(rom_str));
+        
+        // Log ROM ID
+        char rom_log[64];
+        snprintf(rom_log, sizeof(rom_log), "DS18B20: Sensor %d ROM: %s", i, rom_str);
+        publish_log(rom_log);
         
         // Check if we have a friendly name mapping for this sensor
         const char* friendly_name = get_sensor_friendly_name(rom_str);
@@ -203,11 +224,15 @@ int main()
         if (friendly_name != NULL) {
             // Use friendly name
             snprintf(temp_topic_names[i], sizeof(temp_topic_names[i]), "temperature/%s", friendly_name);
-            printf("DS18B20: Sensor %d (%s) -> Topic: %s\n", i, rom_str, temp_topic_names[i]);
+            char topic_log[96];
+            snprintf(topic_log, sizeof(topic_log), "DS18B20: Sensor %d -> Topic: %s", i, temp_topic_names[i]);
+            publish_log(topic_log);
         } else {
             // Use ROM ID as fallback
             snprintf(temp_topic_names[i], sizeof(temp_topic_names[i]), "temperature/sensor_%s", rom_str);
-            printf("DS18B20: Sensor %d (%s) -> Topic: %s (no mapping)\n", i, rom_str, temp_topic_names[i]);
+            char topic_log[96];
+            snprintf(topic_log, sizeof(topic_log), "DS18B20: Sensor %d -> Topic: %s (no mapping)", i, temp_topic_names[i]);
+            publish_log(topic_log);
         }
         
         rcl_ret_t pub_ret = rclc_publisher_init_default(
@@ -218,12 +243,16 @@ int main()
         );
         
         if (pub_ret == RCL_RET_OK) {
-            printf("DS18B20: Publisher %d initialized successfully\n", i);
+            char success_log[64];
+            snprintf(success_log, sizeof(success_log), "DS18B20: Publisher %d initialized successfully", i);
+            publish_log(success_log);
         } else {
-            printf("DS18B20: Failed to initialize publisher %d (error: %d)\n", i, pub_ret);
+            char error_log[64];
+            snprintf(error_log, sizeof(error_log), "DS18B20: Failed to init publisher %d (error: %d)", i, pub_ret);
+            publish_log(error_log);
         }
     }
-    printf("DS18B20: Publisher initialization complete\n");
+    publish_log("DS18B20: Publisher initialization complete");
 
     rclc_executor_init(&executor, &support.context, 1, &allocator);
     rclc_executor_add_subscription(&executor, &subscriber, &msg, &subscription_callback, ON_NEW_DATA);
@@ -240,6 +269,7 @@ int main()
             // Agent disconnected, cleanup and restart
             rclc_executor_fini(&executor);
             rcl_subscription_fini(&subscriber, &node);
+            rcl_publisher_fini(&log_publisher, &node);
             
             // Cleanup temperature publishers
             for (uint8_t i = 0; i < sensor_count; i++) {
@@ -270,6 +300,15 @@ int main()
             // Reinitialize everything
             rclc_support_init(&support, 0, NULL, &allocator);
             rclc_node_init_default(&node, "pico_node", "", &support);
+            
+            // Reinitialize logging publisher
+            rclc_publisher_init_default(
+                &log_publisher,
+                &node,
+                ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
+                "pico_logs"
+            );
+            
             rclc_subscription_init_default(
                 &subscriber,
                 &node,
@@ -313,7 +352,10 @@ int main()
         {
             if (!temp_conversion_in_progress) {
                 // Start conversion for all sensors simultaneously
-                printf("DS18B20: Starting temperature conversion for %d sensors\n", sensor_count);
+                char conv_log[64];
+                snprintf(conv_log, sizeof(conv_log), "DS18B20: Starting conversion for %d sensors", sensor_count);
+                publish_log(conv_log);
+                
                 for (uint8_t i = 0; i < sensor_count; i++) {
                     if (temp_bus.sensors[i].valid) {
                         ds18b20_start_conversion(&temp_bus, NULL); // NULL = all sensors at once
@@ -324,7 +366,7 @@ int main()
                 last_temp_conversion_start_ms = current_time_ms;
             } else if ((current_time_ms - last_temp_conversion_start_ms) >= 750) {
                 // Conversion should be complete, read all sensors
-                printf("DS18B20: Reading temperatures and publishing...\n");
+                publish_log("DS18B20: Reading temperatures and publishing...");
                 for (uint8_t i = 0; i < sensor_count; i++) {
                     if (temp_bus.sensors[i].valid) {
                         float temperature = ds18b20_read_temperature(&temp_bus, temp_bus.sensors[i].rom);
@@ -332,10 +374,15 @@ int main()
                         if (temperature != -999.0f) {
                             temp_msgs[i].data = temperature;
                             rcl_ret_t pub_ret = rcl_publish(&temp_publishers[i], &temp_msgs[i], NULL);
-                            printf("DS18B20: Sensor %d: %.2f°C published to %s (ret: %d)\n", 
+                            
+                            char temp_log[128];
+                            snprintf(temp_log, sizeof(temp_log), "DS18B20: Sensor %d: %.2f°C -> %s (ret: %d)", 
                                    i, temperature, temp_topic_names[i], pub_ret);
+                            publish_log(temp_log);
                         } else {
-                            printf("DS18B20: Sensor %d: Failed to read temperature\n", i);
+                            char error_log[64];
+                            snprintf(error_log, sizeof(error_log), "DS18B20: Sensor %d: Failed to read temperature", i);
+                            publish_log(error_log);
                         }
                     }
                 }
