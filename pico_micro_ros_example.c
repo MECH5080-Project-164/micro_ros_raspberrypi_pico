@@ -73,7 +73,7 @@ void publish_log(const char* message) {
     log_msg.data.data = log_buffer;
     log_msg.data.size = strlen(log_buffer);
     log_msg.data.capacity = sizeof(log_buffer);
-    rcl_publish(&log_publisher, &log_msg, NULL);
+    (void)rcl_publish(&log_publisher, &log_msg, NULL);  // Cast to void to suppress warning
 }
 
 // Function to get friendly name for a ROM ID

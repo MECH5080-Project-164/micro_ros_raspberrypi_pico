@@ -16,19 +16,6 @@
 // UART0: TX=0,12,16 RX=1,13,17
 // UART1: TX=4,8    RX=5,9
 
-void usleep(uint64_t us)
-{
-    sleep_us(us);
-}
-
-int clock_gettime(clockid_t unused, struct timespec *tp)
-{
-    uint64_t m = time_us_64();
-    tp->tv_sec = m / 1000000;
-    tp->tv_nsec = (m % 1000000) * 1000;
-    return 0;
-}
-
 bool pico_uart_transport_open(struct uxrCustomTransport * transport)
 {
     // Initialize UART
@@ -52,7 +39,7 @@ bool pico_uart_transport_close(struct uxrCustomTransport * transport)
     return true;
 }
 
-size_t pico_uart_transport_write(struct uxrCustomTransport * transport, uint8_t *buf, size_t len, uint8_t *errcode)
+size_t pico_uart_transport_write(struct uxrCustomTransport * transport, const uint8_t *buf, size_t len, uint8_t *errcode)
 {
     size_t written = 0;
     
