@@ -23,6 +23,7 @@ const uint DS18B20_PIN = 18; // GPIO pin for DS18B20 1-Wire bus
 // Timeout configuration
 const uint32_t PWM_TIMEOUT_MS = 1000; // 1 seconds timeout (configurable)
 const uint32_t TEMP_PUBLISH_INTERVAL_MS = 1000; // 1 seconds between temperature readings
+const uint32_t AGENT_PING_INTERVAL_MS = 5000; // Check agent connection every 5 seconds
 
 rcl_subscription_t subscriber;
 std_msgs__msg__Int32 msg;
@@ -52,6 +53,7 @@ char temp_topic_names[MAX_DS18B20_SENSORS][64];
 uint32_t last_temp_publish_time_ms = 0;
 uint32_t last_temp_conversion_start_ms = 0;
 bool temp_conversion_in_progress = false;
+uint32_t last_agent_ping_ms = 0;
 
 // Sensor name mappings - Add your sensor ROM IDs and friendly names here
 typedef struct {
@@ -158,6 +160,7 @@ int main()
     last_temp_publish_time_ms = to_ms_since_boot(get_absolute_time());
     last_temp_conversion_start_ms = 0;
     temp_conversion_in_progress = false;
+    last_agent_ping_ms = to_ms_since_boot(get_absolute_time());
 
     rcl_node_t node;
     rcl_allocator_t allocator;
@@ -261,10 +264,28 @@ int main()
     while (true)
     {
         rcl_ret_t spin_ret = rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100));
+        uint32_t current_time_ms = to_ms_since_boot(get_absolute_time());
         
-        // Check if agent disconnected
+        // Periodically ping the agent to detect disconnection
+        if ((current_time_ms - last_agent_ping_ms) > AGENT_PING_INTERVAL_MS)
+        {
+            rcl_ret_t ping_ret = rmw_uros_ping_agent(1000, 1); // 1 second timeout, 1 attempt
+            if (ping_ret != RCL_RET_OK)
+            {
+                // Agent is not responding, force reconnection
+                publish_log("Agent ping failed, forcing reconnection...");
+                spin_ret = RCL_RET_ERROR; // Force the reconnection logic
+            } else {
+                publish_log("Agent ping successful");
+            }
+            last_agent_ping_ms = current_time_ms;
+        }
+        
+        // Check if agent disconnected (either from spin failure or ping failure)
         if (spin_ret != RCL_RET_OK)
         {
+            publish_log("Connection lost - starting cleanup and reconnection...");
+            
             // Agent disconnected, cleanup and restart
             rclc_executor_fini(&executor);
             rcl_subscription_fini(&subscriber, &node);
@@ -335,12 +356,12 @@ int main()
             last_temp_publish_time_ms = to_ms_since_boot(get_absolute_time());
             last_temp_conversion_start_ms = 0;
             temp_conversion_in_progress = false;
+            last_agent_ping_ms = to_ms_since_boot(get_absolute_time());
             gpio_put(LED_PIN, 1);
             continue;
         }
         
         // Check for timeout and set PWM to 0% if no recent messages
-        uint32_t current_time_ms = to_ms_since_boot(get_absolute_time());
         if ((current_time_ms - last_message_time_ms) > PWM_TIMEOUT_MS)
         {
             pwm_set_chan_level(slice_num, channel, 0);
