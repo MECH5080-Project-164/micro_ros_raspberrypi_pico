@@ -63,7 +63,8 @@ typedef struct {
 
 // Define your sensor mappings here - replace with your actual ROM IDs
 static const sensor_mapping_t sensor_mappings[] = {
-    {"2827225400000080", "Test_Sensor"},
+    {"28BBF1500000005", "Bellows_Air"},
+    {"28B0A754000000A", "Bellows_TEP"}
     // Add more mappings as needed
 };
 
