@@ -31,8 +31,8 @@ target_include_directories(pico_micro_ros_example PUBLIC
 SET(CMAKE_C_FLAGS  "${CMAKE_C_FLAGS} -ffunction-sections -fdata-sections")
 SET(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -ffunction-sections -fdata-sections")
 
-# Configure Pico - Enable both USB and UART
-pico_enable_stdio_usb(pico_micro_ros_example 1)
+# Configure Pico
+pico_enable_stdio_usb(pico_micro_ros_example 0)
 pico_enable_stdio_uart(pico_micro_ros_example 1)
 add_compile_definitions(PICO_UART_ENABLE_CRLF_SUPPORT=0)
 add_compile_definitions(PICO_STDIO_ENABLE_CRLF_SUPPORT=0)

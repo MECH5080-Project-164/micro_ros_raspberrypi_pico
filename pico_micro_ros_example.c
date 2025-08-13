@@ -126,9 +126,6 @@ void subscription_callback(const void * msgin)
 
 int main()
 {
-    // Enable USB serial for picotool programming - must be first!
-    stdio_init_all();
-    
     rmw_uros_set_custom_transport(
 		true,
 		NULL,
