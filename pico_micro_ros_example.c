@@ -12,6 +12,7 @@
 
 #include "pico/stdlib.h"
 #include "hardware/pwm.h"
+#include "hardware/adc.h"
 #include "pico_uart_transports.h"
 #include "ds18b20.h"
 #include "pico/bootrom.h"
@@ -23,6 +24,12 @@ const uint PWM_PIN_13 = 13; // GPIO pin 13 for PWM output
 const uint PWM_PIN_14 = 14; // GPIO pin 14 for PWM output
 const uint PWM_PIN_15 = 15; // GPIO pin 15 for PWM output
 const uint DS18B20_PIN = 18; // GPIO pin for DS18B20 1-Wire bus
+const uint BATTERY_ADC_PIN = 26; // GPIO26 (ADC0) for battery voltage monitoring
+
+// Voltage monitoring configuration
+const float BATTERY_VOLTAGE_DIVIDER_RATIO = 8.33f; // 25V max -> 3.0V (see calculation below)
+const float ADC_CONVERSION_FACTOR = 3.3f / (1 << 12); // 3.3V reference, 12-bit ADC
+const uint32_t VOLTAGE_PUBLISH_INTERVAL_MS = 5000; // 5 seconds between voltage readings
 
 // Timeout configuration
 const uint32_t PWM_TIMEOUT_MS = 1000; // 1 seconds timeout (configurable)
@@ -66,6 +73,11 @@ char log_buffer[256];
 // Timeout tracking
 volatile uint32_t last_message_time_ms = 0;
 volatile uint32_t last_pump_message_time_ms = 0;
+
+// Battery voltage monitoring
+rcl_publisher_t battery_voltage_publisher;
+std_msgs__msg__Float32 battery_voltage_msg;
+uint32_t last_voltage_publish_time_ms = 0;
 
 // Software reset function
 void reset_to_bootloader() {
@@ -114,6 +126,26 @@ const char* get_sensor_friendly_name(const char* rom_id) {
         }
     }
     return NULL; // No mapping found
+}
+
+// Battery voltage monitoring functions
+void init_battery_voltage_monitoring(void) {
+    adc_init();
+    adc_gpio_init(BATTERY_ADC_PIN);
+    adc_select_input(0); // ADC0 for GPIO26
+}
+
+float read_battery_voltage(void) {
+    // Read raw ADC value
+    uint16_t adc_raw = adc_read();
+
+    // Convert to voltage (0-3.3V)
+    float adc_voltage = adc_raw * ADC_CONVERSION_FACTOR;
+
+    // Convert back to actual battery voltage using voltage divider ratio
+    float battery_voltage = adc_voltage * BATTERY_VOLTAGE_DIVIDER_RATIO;
+
+    return battery_voltage;
 }
 
 // PWM helper functions
@@ -288,7 +320,12 @@ int main()
     gpio_set_dir(LED_PIN, GPIO_OUT);
 
     // Initialise all PWM channels
-    init_all_pwm_channels();    // Initialise DS18B20 temperature sensors
+    init_all_pwm_channels();
+
+    // Initialize battery voltage monitoring
+    init_battery_voltage_monitoring();
+
+    // Initialise DS18B20 temperature sensors
     ds18b20_init(&temp_bus, DS18B20_PIN);
     uint8_t sensor_count = ds18b20_scan_sensors(&temp_bus);
 
@@ -296,6 +333,7 @@ int main()
     last_message_time_ms = to_ms_since_boot(get_absolute_time());
     last_pump_message_time_ms = to_ms_since_boot(get_absolute_time());
     last_temp_publish_time_ms = to_ms_since_boot(get_absolute_time());
+    last_voltage_publish_time_ms = to_ms_since_boot(get_absolute_time());
     last_temp_conversion_start_ms = 0;
     temp_conversion_in_progress = false;
     last_agent_ping_ms = to_ms_since_boot(get_absolute_time());
@@ -323,6 +361,14 @@ int main()
         "pico_logs"
     );
 
+    // Initialize battery voltage publisher
+    rclc_publisher_init_default(
+        &battery_voltage_publisher,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+        "battery_voltage"
+    );
+
     // Initialise PWM subscribers
     init_pwm_subscribers(&node);
 
@@ -335,6 +381,11 @@ int main()
     publish_log("PWM: Initialised pins 13, 14, 15, 16 at 30Hz");
     publish_log("Topics: pwm_control_13, pwm_control_14, pwm_control_15, pump_pwm_control");
     publish_log("Safety: Only pump_pwm_control (pin 16) has 1s timeout, others maintain values");
+
+    // Log battery voltage monitoring initialization
+    char battery_log[96];
+    snprintf(battery_log, sizeof(battery_log), "Battery: Monitoring on GPIO%d, max 25V, topic: battery_voltage", BATTERY_ADC_PIN);
+    publish_log(battery_log);
 
     for (uint8_t i = 0; i < sensor_count; i++) {
         char rom_str[17];
@@ -415,6 +466,7 @@ int main()
             rclc_executor_fini(&executor);
             cleanup_pwm_subscribers(&node);
             rcl_publisher_fini(&log_publisher, &node);
+            rcl_publisher_fini(&battery_voltage_publisher, &node);
 
             // Cleanup temperature publishers
             for (uint8_t i = 0; i < sensor_count; i++) {
@@ -444,6 +496,14 @@ int main()
                 "pico_logs"
             );
 
+            // Reinitialize battery voltage publisher
+            rclc_publisher_init_default(
+                &battery_voltage_publisher,
+                &node,
+                ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+                "battery_voltage"
+            );
+
             // Reinitialise PWM subscribers
             init_pwm_subscribers(&node);
 
@@ -466,6 +526,7 @@ int main()
             last_message_time_ms = to_ms_since_boot(get_absolute_time());
             last_pump_message_time_ms = to_ms_since_boot(get_absolute_time());
             last_temp_publish_time_ms = to_ms_since_boot(get_absolute_time());
+            last_voltage_publish_time_ms = to_ms_since_boot(get_absolute_time());
             last_temp_conversion_start_ms = 0;
             temp_conversion_in_progress = false;
             last_agent_ping_ms = to_ms_since_boot(get_absolute_time());
@@ -522,6 +583,20 @@ int main()
                 temp_conversion_in_progress = false;
                 last_temp_publish_time_ms = current_time_ms;
             }
+        }
+
+        // Publish battery voltage at regular intervals
+        if ((current_time_ms - last_voltage_publish_time_ms) > VOLTAGE_PUBLISH_INTERVAL_MS)
+        {
+            float battery_voltage = read_battery_voltage();
+            battery_voltage_msg.data = battery_voltage;
+            rcl_ret_t pub_ret = rcl_publish(&battery_voltage_publisher, &battery_voltage_msg, NULL);
+
+            char voltage_log[96];
+            snprintf(voltage_log, sizeof(voltage_log), "Battery: %.2fV -> battery_voltage (ret: %d)", battery_voltage, pub_ret);
+            publish_log(voltage_log);
+
+            last_voltage_publish_time_ms = current_time_ms;
         }
     }
     return 0;

@@ -18,6 +18,7 @@ add_executable(pico_micro_ros_example
 target_link_libraries(pico_micro_ros_example
     pico_stdlib
     hardware_pwm
+    hardware_adc
     hardware_gpio
     hardware_uart
     pico_time
