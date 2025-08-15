@@ -16,6 +16,7 @@
 #include "ds18b20.h"
 #include "pico/bootrom.h"
 
+// Pin definitions
 const uint LED_PIN = 25;
 const uint PWM_PIN = 16; // GPIO pin for PWM output
 const uint PWM_PIN_13 = 13; // GPIO pin 13 for PWM output
@@ -28,29 +29,39 @@ const uint32_t PWM_TIMEOUT_MS = 1000; // 1 seconds timeout (configurable)
 const uint32_t TEMP_PUBLISH_INTERVAL_MS = 1000; // 1 seconds between temperature readings
 const uint32_t AGENT_PING_INTERVAL_MS = 5000; // Check agent connection every 5 seconds
 
-rcl_subscription_t subscriber;
-rcl_subscription_t subscriber_pwm13;
-rcl_subscription_t subscriber_pwm14;
-rcl_subscription_t subscriber_pwm15;
-std_msgs__msg__Int32 msg;
-std_msgs__msg__Int32 msg_pwm13;
-std_msgs__msg__Int32 msg_pwm14;
-std_msgs__msg__Int32 msg_pwm15;
+// PWM configuration structure
+typedef struct {
+    uint pin;
+    uint slice_num;
+    uint channel;
+    const char* topic_name;
+    bool has_timeout;
+} pwm_config_t;
+
+// PWM channel definitions
+typedef enum {
+    PWM_PUMP = 0,    // Pin 16 - has timeout
+    PWM_13 = 1,      // Pin 13 - no timeout
+    PWM_14 = 2,      // Pin 14 - no timeout
+    PWM_15 = 3,      // Pin 15 - no timeout
+    NUM_PWM_CHANNELS
+} pwm_channel_e;
+
+static pwm_config_t pwm_configs[NUM_PWM_CHANNELS] = {
+    [PWM_PUMP] = {PWM_PIN, 0, 0, "pump_pwm_control", true},
+    [PWM_13] = {PWM_PIN_13, 0, 0, "pwm_control_13", false},
+    [PWM_14] = {PWM_PIN_14, 0, 0, "pwm_control_14", false},
+    [PWM_15] = {PWM_PIN_15, 0, 0, "pwm_control_15", false}
+};
+
+// ROS communication structures
+rcl_subscription_t subscribers[NUM_PWM_CHANNELS];
+std_msgs__msg__Int32 pwm_msgs[NUM_PWM_CHANNELS];
 
 // Logging publisher
 rcl_publisher_t log_publisher;
 std_msgs__msg__String log_msg;
 char log_buffer[256];
-
-// PWM configuration
-uint slice_num;
-uint channel;
-uint slice_num_13;
-uint channel_13;
-uint slice_num_14;
-uint channel_14;
-uint slice_num_15;
-uint channel_15;
 
 // Timeout tracking
 volatile uint32_t last_message_time_ms = 0;
@@ -105,28 +116,65 @@ const char* get_sensor_friendly_name(const char* rom_id) {
     return NULL; // No mapping found
 }
 
-void subscription_callback(const void * msgin)
-{
-    const std_msgs__msg__Int32 * msg_in = (const std_msgs__msg__Int32 *)msgin;
+// PWM helper functions
+void init_single_pwm(pwm_config_t* config) {
+    gpio_set_function(config->pin, GPIO_FUNC_PWM);
+    config->slice_num = pwm_gpio_to_slice_num(config->pin);
+    config->channel = pwm_gpio_to_channel(config->pin);
 
+    // Set PWM frequency to 30 Hz
+    pwm_set_clkdiv(config->slice_num, 125.0f);  // 125 MHz / 125 = 1 MHz base frequency
+    pwm_set_wrap(config->slice_num, 33333);     // 1 MHz / 33334 ≈ 30 Hz PWM frequency
+
+    // Start PWM with 0% duty cycle
+    pwm_set_chan_level(config->slice_num, config->channel, 0);
+    pwm_set_enabled(config->slice_num, true);
+}
+
+void init_all_pwm_channels(void) {
+    for (int i = 0; i < NUM_PWM_CHANNELS; i++) {
+        init_single_pwm(&pwm_configs[i]);
+    }
+}
+
+void set_pwm_level(pwm_config_t* config, uint16_t level) {
+    pwm_set_chan_level(config->slice_num, config->channel, level);
+}
+
+void reset_pwm_channels_with_timeout(void) {
+    for (int i = 0; i < NUM_PWM_CHANNELS; i++) {
+        if (pwm_configs[i].has_timeout) {
+            set_pwm_level(&pwm_configs[i], 0);
+        }
+    }
+}
+
+void reset_all_pwm_channels(void) {
+    for (int i = 0; i < NUM_PWM_CHANNELS; i++) {
+        set_pwm_level(&pwm_configs[i], 0);
+    }
+}
+
+// Generic PWM callback function
+void handle_pwm_message(pwm_channel_e channel, const std_msgs__msg__Int32* msg_in) {
     // Update last message time for general timeout tracking
     last_message_time_ms = to_ms_since_boot(get_absolute_time());
-    // Update specific pump message time for pump timeout
-    last_pump_message_time_ms = to_ms_since_boot(get_absolute_time());
+
+    // Update pump-specific timeout if this is the pump channel
+    if (channel == PWM_PUMP) {
+        last_pump_message_time_ms = to_ms_since_boot(get_absolute_time());
+
+        // Special reset command: PWM value of 999 triggers bootloader reset
+        if (msg_in->data == 999) {
+            publish_log("Reset command received, entering bootloader mode...");
+            sleep_ms(100); // Give time for message to be sent
+            reset_to_bootloader();
+            return; // Should never reach here
+        }
+    }
 
     // Constrain PWM value to valid range (0-100 for percentage)
     int32_t pwm_value = msg_in->data;
-
-    // Special reset command: PWM value of 999 triggers bootloader reset:
-    // ros2 topic pub /pump_pwm_control std_msgs/msg/Int32 'data: 999' -1
-
-    if (pwm_value == 999) {
-        publish_log("Reset command received, entering bootloader mode...");
-        sleep_ms(100); // Give time for message to be sent
-        reset_to_bootloader();
-        return; // Should never reach here
-    }
-
     if (pwm_value < 0) pwm_value = 0;
     if (pwm_value > 100) pwm_value = 100;
 
@@ -134,87 +182,94 @@ void subscription_callback(const void * msgin)
     uint16_t pwm_level = (uint16_t)((pwm_value * 65535) / 100);
 
     // Set PWM duty cycle
-    pwm_set_chan_level(slice_num, channel, pwm_level);
-
-    // Toggle LED to indicate message received
-    static bool led_state = false;
-    led_state = !led_state;
-    gpio_put(LED_PIN, led_state);
-}
-
-void subscription_callback_pwm13(const void * msgin)
-{
-    const std_msgs__msg__Int32 * msg_in = (const std_msgs__msg__Int32 *)msgin;
-
-    // Update last message time for general timeout tracking only
-    last_message_time_ms = to_ms_since_boot(get_absolute_time());
-
-    // Constrain PWM value to valid range (0-100 for percentage)
-    int32_t pwm_value = msg_in->data;
-
-    if (pwm_value < 0) pwm_value = 0;
-    if (pwm_value > 100) pwm_value = 100;
-
-    // Convert percentage to PWM level (0-65535 for 16-bit PWM)
-    uint16_t pwm_level = (uint16_t)((pwm_value * 65535) / 100);
-
-    // Set PWM duty cycle for pin 13
-    pwm_set_chan_level(slice_num_13, channel_13, pwm_level);
+    set_pwm_level(&pwm_configs[channel], pwm_level);
 
     // Log the PWM change
-    char log_buffer_local[64];
-    snprintf(log_buffer_local, sizeof(log_buffer_local), "PWM13: Set to %d%% (level: %d)", pwm_value, pwm_level);
-    publish_log(log_buffer_local);
+    char log_msg_local[64];
+    snprintf(log_msg_local, sizeof(log_msg_local), "PWM%d: Set to %d%% (level: %d)",
+             pwm_configs[channel].pin, pwm_value, pwm_level);
+    publish_log(log_msg_local);
+
+    // Toggle LED for pump channel to indicate message received
+    if (channel == PWM_PUMP) {
+        static bool led_state = false;
+        led_state = !led_state;
+        gpio_put(LED_PIN, led_state);
+    }
 }
 
-void subscription_callback_pwm14(const void * msgin)
-{
-    const std_msgs__msg__Int32 * msg_in = (const std_msgs__msg__Int32 *)msgin;
-
-    // Update last message time for general timeout tracking only
-    last_message_time_ms = to_ms_since_boot(get_absolute_time());
-
-    // Constrain PWM value to valid range (0-100 for percentage)
-    int32_t pwm_value = msg_in->data;
-
-    if (pwm_value < 0) pwm_value = 0;
-    if (pwm_value > 100) pwm_value = 100;
-
-    // Convert percentage to PWM level (0-65535 for 16-bit PWM)
-    uint16_t pwm_level = (uint16_t)((pwm_value * 65535) / 100);
-
-    // Set PWM duty cycle for pin 14
-    pwm_set_chan_level(slice_num_14, channel_14, pwm_level);
-
-    // Log the PWM change
-    char log_buffer_local[64];
-    snprintf(log_buffer_local, sizeof(log_buffer_local), "PWM14: Set to %d%% (level: %d)", pwm_value, pwm_level);
-    publish_log(log_buffer_local);
+// Individual callback functions
+void subscription_callback(const void * msgin) {
+    handle_pwm_message(PWM_PUMP, (const std_msgs__msg__Int32 *)msgin);
 }
 
-void subscription_callback_pwm15(const void * msgin)
-{
-    const std_msgs__msg__Int32 * msg_in = (const std_msgs__msg__Int32 *)msgin;
+void subscription_callback_pwm13(const void * msgin) {
+    handle_pwm_message(PWM_13, (const std_msgs__msg__Int32 *)msgin);
+}
 
-    // Update last message time for general timeout tracking only
-    last_message_time_ms = to_ms_since_boot(get_absolute_time());
+void subscription_callback_pwm14(const void * msgin) {
+    handle_pwm_message(PWM_14, (const std_msgs__msg__Int32 *)msgin);
+}
 
-    // Constrain PWM value to valid range (0-100 for percentage)
-    int32_t pwm_value = msg_in->data;
+void subscription_callback_pwm15(const void * msgin) {
+    handle_pwm_message(PWM_15, (const std_msgs__msg__Int32 *)msgin);
+}
 
-    if (pwm_value < 0) pwm_value = 0;
-    if (pwm_value > 100) pwm_value = 100;
+// ROS helper functions
+void init_pwm_subscribers(rcl_node_t* node) {
+    // Array of callback functions
+    void (*callbacks[])(const void*) = {
+        subscription_callback,
+        subscription_callback_pwm13,
+        subscription_callback_pwm14,
+        subscription_callback_pwm15
+    };
 
-    // Convert percentage to PWM level (0-65535 for 16-bit PWM)
-    uint16_t pwm_level = (uint16_t)((pwm_value * 65535) / 100);
+    for (int i = 0; i < NUM_PWM_CHANNELS; i++) {
+        rclc_subscription_init_default(
+            &subscribers[i],
+            node,
+            ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
+            pwm_configs[i].topic_name
+        );
+    }
+}
 
-    // Set PWM duty cycle for pin 15
-    pwm_set_chan_level(slice_num_15, channel_15, pwm_level);
+void cleanup_pwm_subscribers(rcl_node_t* node) {
+    for (int i = 0; i < NUM_PWM_CHANNELS; i++) {
+        rcl_subscription_fini(&subscribers[i], node);
+    }
+}
 
-    // Log the PWM change
-    char log_buffer_local[64];
-    snprintf(log_buffer_local, sizeof(log_buffer_local), "PWM15: Set to %d%% (level: %d)", pwm_value, pwm_level);
-    publish_log(log_buffer_local);
+void add_pwm_subscriptions_to_executor(rclc_executor_t* executor) {
+    // Array of callback functions
+    void (*callbacks[])(const void*) = {
+        subscription_callback,
+        subscription_callback_pwm13,
+        subscription_callback_pwm14,
+        subscription_callback_pwm15
+    };
+
+    for (int i = 0; i < NUM_PWM_CHANNELS; i++) {
+        rclc_executor_add_subscription(executor, &subscribers[i], &pwm_msgs[i], callbacks[i], ON_NEW_DATA);
+    }
+}
+
+void wait_for_agent_connection(void) {
+    const int timeout_ms = 1000;
+    const uint8_t attempts_per_cycle = 1;
+    rcl_ret_t ret;
+
+    do {
+        ret = rmw_uros_ping_agent(timeout_ms, attempts_per_cycle);
+        if (ret != RCL_RET_OK) {
+            // Flash LED to indicate connection attempt
+            gpio_put(LED_PIN, 1);
+            sleep_ms(100);
+            gpio_put(LED_PIN, 0);
+            sleep_ms(100);
+        }
+        } while (ret != RCL_RET_OK);
 }
 
 int main()
@@ -232,59 +287,8 @@ int main()
     gpio_init(LED_PIN);
     gpio_set_dir(LED_PIN, GPIO_OUT);
 
-    // Initialize PWM for pin 16 (original)
-    gpio_set_function(PWM_PIN, GPIO_FUNC_PWM);
-    slice_num = pwm_gpio_to_slice_num(PWM_PIN);
-    channel = pwm_gpio_to_channel(PWM_PIN);
-
-    // Set PWM frequency to 30 Hz (adjust as needed)
-    pwm_set_clkdiv(slice_num, 125.0f);  // 125 MHz / 125 = 1 MHz base frequency
-    pwm_set_wrap(slice_num, 33333);     // 1 MHz / 33334 ≈ 30 Hz PWM frequency
-
-    // Start PWM with 0% duty cycle
-    pwm_set_chan_level(slice_num, channel, 0);
-    pwm_set_enabled(slice_num, true);
-
-    // Initialize PWM for pin 13
-    gpio_set_function(PWM_PIN_13, GPIO_FUNC_PWM);
-    slice_num_13 = pwm_gpio_to_slice_num(PWM_PIN_13);
-    channel_13 = pwm_gpio_to_channel(PWM_PIN_13);
-
-    // Set PWM frequency to 30 Hz
-    pwm_set_clkdiv(slice_num_13, 125.0f);
-    pwm_set_wrap(slice_num_13, 33333);
-
-    // Start PWM with 0% duty cycle
-    pwm_set_chan_level(slice_num_13, channel_13, 0);
-    pwm_set_enabled(slice_num_13, true);
-
-    // Initialize PWM for pin 14
-    gpio_set_function(PWM_PIN_14, GPIO_FUNC_PWM);
-    slice_num_14 = pwm_gpio_to_slice_num(PWM_PIN_14);
-    channel_14 = pwm_gpio_to_channel(PWM_PIN_14);
-
-    // Set PWM frequency to 30 Hz
-    pwm_set_clkdiv(slice_num_14, 125.0f);
-    pwm_set_wrap(slice_num_14, 33333);
-
-    // Start PWM with 0% duty cycle
-    pwm_set_chan_level(slice_num_14, channel_14, 0);
-    pwm_set_enabled(slice_num_14, true);
-
-    // Initialize PWM for pin 15
-    gpio_set_function(PWM_PIN_15, GPIO_FUNC_PWM);
-    slice_num_15 = pwm_gpio_to_slice_num(PWM_PIN_15);
-    channel_15 = pwm_gpio_to_channel(PWM_PIN_15);
-
-    // Set PWM frequency to 30 Hz
-    pwm_set_clkdiv(slice_num_15, 125.0f);
-    pwm_set_wrap(slice_num_15, 33333);
-
-    // Start PWM with 0% duty cycle
-    pwm_set_chan_level(slice_num_15, channel_15, 0);
-    pwm_set_enabled(slice_num_15, true);
-
-    // Initialize DS18B20 temperature sensors
+    // Initialize all PWM channels
+    init_all_pwm_channels();    // Initialize DS18B20 temperature sensors
     ds18b20_init(&temp_bus, DS18B20_PIN);
     uint8_t sensor_count = ds18b20_scan_sensors(&temp_bus);
 
@@ -300,25 +304,12 @@ int main()
     rcl_allocator_t allocator;
     rclc_support_t support;
     rclc_executor_t executor;
+    rcl_ret_t ret;
 
     allocator = rcl_get_default_allocator();
 
-    // Keep trying to connect to agent indefinitely
-    const int timeout_ms = 1000;
-    const uint8_t attempts_per_cycle = 1; // Try 1 time per cycle
-
-    rcl_ret_t ret;
-    do {
-        ret = rmw_uros_ping_agent(timeout_ms, attempts_per_cycle);
-        if (ret != RCL_RET_OK)
-        {
-            // Flash LED to indicate connection attempt
-            gpio_put(LED_PIN, 1);
-            sleep_ms(100);
-            gpio_put(LED_PIN, 0);
-            sleep_ms(100);
-        }
-    } while (ret != RCL_RET_OK);
+    // Wait for agent connection
+    wait_for_agent_connection();
 
     rclc_support_init(&support, 0, NULL, &allocator);
 
@@ -332,37 +323,8 @@ int main()
         "pico_logs"
     );
 
-    // Initialize subscriber for PWM control
-    rclc_subscription_init_default(
-        &subscriber,
-        &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
-        "pump_pwm_control"
-    );
-
-    // Initialize subscriber for PWM pin 13 control
-    rclc_subscription_init_default(
-        &subscriber_pwm13,
-        &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
-        "pwm_control_13"
-    );
-
-    // Initialize subscriber for PWM pin 14 control
-    rclc_subscription_init_default(
-        &subscriber_pwm14,
-        &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
-        "pwm_control_14"
-    );
-
-    // Initialize subscriber for PWM pin 15 control
-    rclc_subscription_init_default(
-        &subscriber_pwm15,
-        &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
-        "pwm_control_15"
-    );
+    // Initialize PWM subscribers
+    init_pwm_subscribers(&node);
 
     // Initialize temperature publishers for each DS18B20 sensor
     char startup_msg[128];
@@ -419,11 +381,8 @@ int main()
     }
     publish_log("DS18B20: Publisher initialization complete");
 
-    rclc_executor_init(&executor, &support.context, 4, &allocator);
-    rclc_executor_add_subscription(&executor, &subscriber, &msg, &subscription_callback, ON_NEW_DATA);
-    rclc_executor_add_subscription(&executor, &subscriber_pwm13, &msg_pwm13, &subscription_callback_pwm13, ON_NEW_DATA);
-    rclc_executor_add_subscription(&executor, &subscriber_pwm14, &msg_pwm14, &subscription_callback_pwm14, ON_NEW_DATA);
-    rclc_executor_add_subscription(&executor, &subscriber_pwm15, &msg_pwm15, &subscription_callback_pwm15, ON_NEW_DATA);
+    rclc_executor_init(&executor, &support.context, NUM_PWM_CHANNELS, &allocator);
+    add_pwm_subscriptions_to_executor(&executor);
 
     gpio_put(LED_PIN, 1);
 
@@ -454,10 +413,7 @@ int main()
 
             // Agent disconnected, cleanup and restart
             rclc_executor_fini(&executor);
-            rcl_subscription_fini(&subscriber, &node);
-            rcl_subscription_fini(&subscriber_pwm13, &node);
-            rcl_subscription_fini(&subscriber_pwm14, &node);
-            rcl_subscription_fini(&subscriber_pwm15, &node);
+            cleanup_pwm_subscribers(&node);
             rcl_publisher_fini(&log_publisher, &node);
 
             // Cleanup temperature publishers
@@ -471,23 +427,10 @@ int main()
             rclc_support_fini(&support);
 
             // Reset PWM to 0% for safety
-            pwm_set_chan_level(slice_num, channel, 0);
-            pwm_set_chan_level(slice_num_13, channel_13, 0);
-            pwm_set_chan_level(slice_num_14, channel_14, 0);
-            pwm_set_chan_level(slice_num_15, channel_15, 0);
+            reset_all_pwm_channels();
 
             // Start reconnection process
-            do {
-                ret = rmw_uros_ping_agent(timeout_ms, attempts_per_cycle);
-                if (ret != RCL_RET_OK)
-                {
-                    // Flash LED to indicate connection attempt
-                    gpio_put(LED_PIN, 1);
-                    sleep_ms(100);
-                    gpio_put(LED_PIN, 0);
-                    sleep_ms(100);
-                }
-            } while (ret != RCL_RET_OK);
+            wait_for_agent_connection();
 
             // Reinitialize everything
             rclc_support_init(&support, 0, NULL, &allocator);
@@ -501,33 +444,8 @@ int main()
                 "pico_logs"
             );
 
-            rclc_subscription_init_default(
-                &subscriber,
-                &node,
-                ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
-                "pump_pwm_control"
-            );
-
-            rclc_subscription_init_default(
-                &subscriber_pwm13,
-                &node,
-                ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
-                "pwm_control_13"
-            );
-
-            rclc_subscription_init_default(
-                &subscriber_pwm14,
-                &node,
-                ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
-                "pwm_control_14"
-            );
-
-            rclc_subscription_init_default(
-                &subscriber_pwm15,
-                &node,
-                ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
-                "pwm_control_15"
-            );
+            // Reinitialize PWM subscribers
+            init_pwm_subscribers(&node);
 
             // Reinitialize temperature publishers
             for (uint8_t i = 0; i < sensor_count; i++) {
@@ -541,11 +459,8 @@ int main()
                 }
             }
 
-            rclc_executor_init(&executor, &support.context, 4, &allocator);
-            rclc_executor_add_subscription(&executor, &subscriber, &msg, &subscription_callback, ON_NEW_DATA);
-            rclc_executor_add_subscription(&executor, &subscriber_pwm13, &msg_pwm13, &subscription_callback_pwm13, ON_NEW_DATA);
-            rclc_executor_add_subscription(&executor, &subscriber_pwm14, &msg_pwm14, &subscription_callback_pwm14, ON_NEW_DATA);
-            rclc_executor_add_subscription(&executor, &subscriber_pwm15, &msg_pwm15, &subscription_callback_pwm15, ON_NEW_DATA);
+            rclc_executor_init(&executor, &support.context, NUM_PWM_CHANNELS, &allocator);
+            add_pwm_subscriptions_to_executor(&executor);
 
             // Reset timeout tracking
             last_message_time_ms = to_ms_since_boot(get_absolute_time());
@@ -562,7 +477,7 @@ int main()
         // PWM pins 13, 14, 15 maintain their values (no timeout)
         if ((current_time_ms - last_pump_message_time_ms) > PWM_TIMEOUT_MS)
         {
-            pwm_set_chan_level(slice_num, channel, 0); // Only pump PWM (pin 16) has timeout
+            set_pwm_level(&pwm_configs[PWM_PUMP], 0); // Only pump PWM (pin 16) has timeout
         }
 
         // Publish temperature readings at regular intervals
