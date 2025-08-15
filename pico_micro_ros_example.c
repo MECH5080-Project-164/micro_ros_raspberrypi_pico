@@ -82,16 +82,16 @@ uint32_t last_temp_conversion_start_ms = 0;
 bool temp_conversion_in_progress = false;
 uint32_t last_agent_ping_ms = 0;
 
-// Sensor name mappings - Add your sensor ROM IDs and friendly names here
+// Sensor name mappings
 typedef struct {
     char rom_id[17];        // 16 hex chars + null terminator
     char friendly_name[32]; // Friendly name for the sensor
 } sensor_mapping_t;
 
-// Define your sensor mappings here - replace with your actual ROM IDs
+// Define sensor mappings
 static const sensor_mapping_t sensor_mappings[] = {
-    {"28BBF1500000005", "Bellows_Air"},
-    {"28B0A754000000A", "Bellows_TEP"}
+    {"28BBF1500000005", "Vine_Air"},
+    {"28B0A754000000A", "Vine_TEP"}
     // Add more mappings as needed
 };
 
@@ -283,16 +283,16 @@ int main()
 		pico_uart_transport_read
 	);
 
-    // Initialize LED
+    // Initialise LED
     gpio_init(LED_PIN);
     gpio_set_dir(LED_PIN, GPIO_OUT);
 
-    // Initialize all PWM channels
-    init_all_pwm_channels();    // Initialize DS18B20 temperature sensors
+    // Initialise all PWM channels
+    init_all_pwm_channels();    // Initialise DS18B20 temperature sensors
     ds18b20_init(&temp_bus, DS18B20_PIN);
     uint8_t sensor_count = ds18b20_scan_sensors(&temp_bus);
 
-    // Initialize timeout tracking
+    // Initialise timeout tracking
     last_message_time_ms = to_ms_since_boot(get_absolute_time());
     last_pump_message_time_ms = to_ms_since_boot(get_absolute_time());
     last_temp_publish_time_ms = to_ms_since_boot(get_absolute_time());
@@ -315,7 +315,7 @@ int main()
 
     rclc_node_init_default(&node, "pico_node", "", &support);
 
-    // Initialize logging publisher
+    // Initialise logging publisher
     rclc_publisher_init_default(
         &log_publisher,
         &node,
@@ -323,16 +323,16 @@ int main()
         "pico_logs"
     );
 
-    // Initialize PWM subscribers
+    // Initialise PWM subscribers
     init_pwm_subscribers(&node);
 
-    // Initialize temperature publishers for each DS18B20 sensor
+    // Initialise temperature publishers for each DS18B20 sensor
     char startup_msg[128];
     snprintf(startup_msg, sizeof(startup_msg), "DS18B20: Found %d sensors on GPIO %d", sensor_count, DS18B20_PIN);
     publish_log(startup_msg);
 
-    // Log PWM initialization
-    publish_log("PWM: Initialized pins 13, 14, 15, 16 at 30Hz");
+    // Log PWM initialisation
+    publish_log("PWM: Initialised pins 13, 14, 15, 16 at 30Hz");
     publish_log("Topics: pwm_control_13, pwm_control_14, pwm_control_15, pump_pwm_control");
     publish_log("Safety: Only pump_pwm_control (pin 16) has 1s timeout, others maintain values");
 
@@ -371,7 +371,7 @@ int main()
 
         if (pub_ret == RCL_RET_OK) {
             char success_log[64];
-            snprintf(success_log, sizeof(success_log), "DS18B20: Publisher %d initialized successfully", i);
+            snprintf(success_log, sizeof(success_log), "DS18B20: Publisher %d initialised successfully", i);
             publish_log(success_log);
         } else {
             char error_log[64];
@@ -379,7 +379,7 @@ int main()
             publish_log(error_log);
         }
     }
-    publish_log("DS18B20: Publisher initialization complete");
+    publish_log("DS18B20: Publisher initialisation complete");
 
     rclc_executor_init(&executor, &support.context, NUM_PWM_CHANNELS, &allocator);
     add_pwm_subscriptions_to_executor(&executor);
@@ -432,11 +432,11 @@ int main()
             // Start reconnection process
             wait_for_agent_connection();
 
-            // Reinitialize everything
+            // Reinitialise everything
             rclc_support_init(&support, 0, NULL, &allocator);
             rclc_node_init_default(&node, "pico_node", "", &support);
 
-            // Reinitialize logging publisher
+            // Reinitialise logging publisher
             rclc_publisher_init_default(
                 &log_publisher,
                 &node,
@@ -444,10 +444,10 @@ int main()
                 "pico_logs"
             );
 
-            // Reinitialize PWM subscribers
+            // Reinitialise PWM subscribers
             init_pwm_subscribers(&node);
 
-            // Reinitialize temperature publishers
+            // Reinitialise temperature publishers
             for (uint8_t i = 0; i < sensor_count; i++) {
                 if (temp_bus.sensors[i].valid) {
                     rclc_publisher_init_default(
