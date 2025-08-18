@@ -193,7 +193,7 @@ void init_single_pwm(pwm_config_t* config) {
     snprintf(slice_log, sizeof(slice_log), "PWM init: pin=%d slice=%d channel=%d is_servo=%d", config->pin, config->slice_num, config->channel, config->is_servo);
     publish_log(slice_log);
 
-    if (config->is_servo) {x
+    if (config->is_servo) {
         // Configure for servo control (50Hz, 20ms period)
         // 125MHz / 125 = 1MHz, then 1MHz / 20000 = 50Hz
         pwm_set_clkdiv(config->slice_num, 125.0f);  // 125 MHz / 125 = 1 MHz
