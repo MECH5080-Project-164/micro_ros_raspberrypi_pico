@@ -52,6 +52,8 @@ typedef struct {
     const char* topic_name;
     bool has_timeout;
     bool is_servo; // True for servo channels, false for regular PWM
+    uint32_t min_pulse_us; // For servo: pulse width at 0° (or 0 if unused)
+    uint32_t max_pulse_us; // For servo: pulse width at 180° (or 0 if unused)
 } pwm_config_t;
 
 // PWM channel definitions
@@ -64,10 +66,12 @@ typedef enum {
 } pwm_channel_e;
 
 static pwm_config_t pwm_configs[NUM_PWM_CHANNELS] = {
-    [PWM_PUMP] = {PWM_PIN, 0, 0, "pump_pwm_control", true, false},
-    [SERVO_13] = {SERVO_PIN_13, 0, 0, "servo_control_13", false, true},
-    [SERVO_14] = {SERVO_PIN_14, 0, 0, "servo_control_14", false, true},
-    [SERVO_15] = {SERVO_PIN_15, 0, 0, "servo_control_15", false, true}
+    // pump: min/max pulses unused
+    [PWM_PUMP] = {PWM_PIN, 0, 0, "pump_pwm_control", true, false, 0, 0},
+    // servos: default to global SERVO_MIN_PULSE_US / SERVO_MAX_PULSE_US
+    [SERVO_13] = {SERVO_PIN_13, 0, 0, "servo_control_13", false, true, SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US},
+    [SERVO_14] = {SERVO_PIN_14, 0, 0, "servo_control_14", false, true, SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US},
+    [SERVO_15] = {SERVO_PIN_15, 0, 0, "servo_control_15", false, true, SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US}
 };// ROS communication structures
 rcl_subscription_t subscribers[NUM_PWM_CHANNELS];
 std_msgs__msg__Int32 pwm_msgs[NUM_PWM_CHANNELS];
@@ -199,8 +203,10 @@ void init_single_pwm(pwm_config_t* config) {
         pwm_set_clkdiv(config->slice_num, 125.0f);  // 125 MHz / 125 = 1 MHz
         pwm_set_wrap(config->slice_num, 19999);     // 1 MHz / 20000 = 50 Hz (20ms period)
 
-        // Start servo at center position (1500μs pulse = 90°)
-        uint16_t center_level = SERVO_CENTER_PULSE_US; // 1500 counts for 1500μs at 1MHz clock
+        // Start servo at center position (average of min/max pulse if provided)
+        uint32_t min_p = config->min_pulse_us ? config->min_pulse_us : SERVO_MIN_PULSE_US;
+        uint32_t max_p = config->max_pulse_us ? config->max_pulse_us : SERVO_MAX_PULSE_US;
+        uint16_t center_level = (uint16_t)((min_p + max_p) / 2);
         pwm_set_chan_level(config->slice_num, config->channel, center_level);
     } else {
         // Configure for regular PWM (30Hz for pump control)
@@ -266,9 +272,11 @@ void handle_pwm_message(pwm_channel_e channel, const std_msgs__msg__Int32* msg_i
         if (servo_angle < 0) servo_angle = 0;
         if (servo_angle > 180) servo_angle = 180;
 
-        // Convert angle to pulse width (1000-2000μs)
-        // Use careful integer math to ensure full range
-        uint32_t pulse_us = SERVO_MIN_PULSE_US + ((uint32_t)servo_angle * (SERVO_MAX_PULSE_US - SERVO_MIN_PULSE_US)) / 180;
+    // Convert angle to pulse width using per-config min/max if available
+    uint32_t min_p = pwm_configs[channel].min_pulse_us ? pwm_configs[channel].min_pulse_us : SERVO_MIN_PULSE_US;
+    uint32_t max_p = pwm_configs[channel].max_pulse_us ? pwm_configs[channel].max_pulse_us : SERVO_MAX_PULSE_US;
+    // Use careful integer math to ensure full range
+    uint32_t pulse_us = min_p + ((uint32_t)servo_angle * (max_p - min_p)) / 180;
 
         // Convert pulse width to PWM level (for 50Hz, 20ms period)
         pwm_level = (uint16_t)pulse_us; // Direct mapping: pulse_us microseconds = pulse_us counts
