@@ -27,7 +27,7 @@ const uint DS18B20_PIN = 18; // GPIO pin for DS18B20 1-Wire bus
 const uint BATTERY_ADC_PIN = 26; // GPIO26 (ADC0) for battery voltage monitoring
 
 // Voltage monitoring configuration
-const float BATTERY_VOLTAGE_DIVIDER_RATIO = 9.148f; // (22k + 2.7k) / 2.7k = 9.148
+const float BATTERY_VOLTAGE_DIVIDER_RATIO = 11.0f; // (22k + 2.2k) / 2.2k = 11.0
 const float ADC_CONVERSION_FACTOR = 3.3f / (1 << 12); // 3.3V reference, 12-bit ADC
 const uint32_t VOLTAGE_PUBLISH_INTERVAL_MS = 5000; // 5 seconds between voltage readings
 const uint8_t VOLTAGE_SAMPLE_COUNT = 16; // Number of ADC samples to average for voltage reading
