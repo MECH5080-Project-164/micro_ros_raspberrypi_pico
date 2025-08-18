@@ -180,14 +180,19 @@ void init_single_pwm(pwm_config_t* config) {
     config->slice_num = pwm_gpio_to_slice_num(config->pin);
     config->channel = pwm_gpio_to_channel(config->pin);
 
-    if (config->is_servo) {
+    // Debug: log which slice and channel are used for this pin
+    char slice_log[64];
+    snprintf(slice_log, sizeof(slice_log), "PWM init: pin=%d slice=%d channel=%d is_servo=%d", config->pin, config->slice_num, config->channel, config->is_servo);
+    publish_log(slice_log);
+
+    if (config->is_servo) {x
         // Configure for servo control (50Hz, 20ms period)
         // 125MHz / 125 = 1MHz, then 1MHz / 20000 = 50Hz
         pwm_set_clkdiv(config->slice_num, 125.0f);  // 125 MHz / 125 = 1 MHz
         pwm_set_wrap(config->slice_num, 19999);     // 1 MHz / 20000 = 50 Hz (20ms period)
 
         // Start servo at center position (1500μs pulse = 90°)
-        uint16_t center_level = 1500; // 1500 counts for 1500μs at 1MHz clock
+        uint16_t center_level = SERVO_CENTER_PULSE_US; // 1500 counts for 1500μs at 1MHz clock
         pwm_set_chan_level(config->slice_num, config->channel, center_level);
     } else {
         // Configure for regular PWM (30Hz for pump control)
@@ -254,13 +259,14 @@ void handle_pwm_message(pwm_channel_e channel, const std_msgs__msg__Int32* msg_i
         if (servo_angle > 180) servo_angle = 180;
 
         // Convert angle to pulse width (1000-2000μs)
-        uint32_t pulse_us = SERVO_MIN_PULSE_US + (servo_angle * (SERVO_MAX_PULSE_US - SERVO_MIN_PULSE_US)) / 180;
+        // Use careful integer math to ensure full range
+        uint32_t pulse_us = SERVO_MIN_PULSE_US + ((uint32_t)servo_angle * (SERVO_MAX_PULSE_US - SERVO_MIN_PULSE_US)) / 180;
 
         // Convert pulse width to PWM level (for 50Hz, 20ms period)
-        pwm_level = pulse_us; // Direct mapping: pulse_us microseconds = pulse_us counts
+        pwm_level = (uint16_t)pulse_us; // Direct mapping: pulse_us microseconds = pulse_us counts
 
-        snprintf(log_msg_local, sizeof(log_msg_local), "Servo%d: Set to %d° (%dμs pulse)",
-                 pwm_configs[channel].pin, servo_angle, pulse_us);
+        snprintf(log_msg_local, sizeof(log_msg_local), "Servo%d: Set to %d° (%dμs pulse, level=%d)",
+                 pwm_configs[channel].pin, servo_angle, pulse_us, pwm_level);
     } else {
         // Regular PWM control: input 0-100 percent
         int32_t pwm_value = msg_in->data;
