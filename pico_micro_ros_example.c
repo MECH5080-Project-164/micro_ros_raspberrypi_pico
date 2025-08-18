@@ -27,9 +27,10 @@ const uint DS18B20_PIN = 18; // GPIO pin for DS18B20 1-Wire bus
 const uint BATTERY_ADC_PIN = 26; // GPIO26 (ADC0) for battery voltage monitoring
 
 // Voltage monitoring configuration
-const float BATTERY_VOLTAGE_DIVIDER_RATIO = 8.33f; // 25V max -> 3.0V (see calculation below)
+const float BATTERY_VOLTAGE_DIVIDER_RATIO = 9.148f; // (22k + 2.7k) / 2.7k = 9.148
 const float ADC_CONVERSION_FACTOR = 3.3f / (1 << 12); // 3.3V reference, 12-bit ADC
 const uint32_t VOLTAGE_PUBLISH_INTERVAL_MS = 5000; // 5 seconds between voltage readings
+const uint8_t VOLTAGE_SAMPLE_COUNT = 16; // Number of ADC samples to average for voltage reading
 
 // Timeout configuration
 const uint32_t PWM_TIMEOUT_MS = 1000; // 1 seconds timeout (configurable)
@@ -136,11 +137,23 @@ void init_battery_voltage_monitoring(void) {
 }
 
 float read_battery_voltage(void) {
-    // Read raw ADC value
-    uint16_t adc_raw = adc_read();
+    // Take multiple samples and average them for better accuracy
+    uint32_t adc_sum = 0;
+
+    for (uint8_t i = 0; i < VOLTAGE_SAMPLE_COUNT; i++) {
+        // Read raw ADC value
+        uint16_t adc_raw = adc_read();
+        adc_sum += adc_raw;
+
+        // Small delay between samples to allow ADC to settle
+        sleep_us(100); // 100 microseconds delay
+    }
+
+    // Calculate average ADC reading
+    uint16_t adc_avg = adc_sum / VOLTAGE_SAMPLE_COUNT;
 
     // Convert to voltage (0-3.3V)
-    float adc_voltage = adc_raw * ADC_CONVERSION_FACTOR;
+    float adc_voltage = adc_avg * ADC_CONVERSION_FACTOR;
 
     // Convert back to actual battery voltage using voltage divider ratio
     float battery_voltage = adc_voltage * BATTERY_VOLTAGE_DIVIDER_RATIO;
