@@ -19,6 +19,7 @@
 
 // Pin definitions
 const uint LED_PIN = 25;
+const uint SMPS_MODE_PIN = 23; // GPIO23 to control SMPS mode for low-noise ADC
 const uint PWM_PIN = 16; // GPIO pin for PWM output (pump control)
 const uint SERVO_PIN_13 = 13; // GPIO pin 13 for servo control
 const uint SERVO_PIN_14 = 14; // GPIO pin 14 for servo control
@@ -150,6 +151,10 @@ float read_battery_voltage(void) {
     // Brief delay to allow ADC input selection to take effect
     sleep_us(50);
 
+    // Enable SMPS PWM mode for low-noise ADC reading
+    gpio_put(SMPS_MODE_PIN, 1);
+    sleep_us(500); // Allow SMPS to settle
+
     // Take multiple samples and average them for better accuracy
     uint32_t adc_sum = 0;
 
@@ -161,6 +166,9 @@ float read_battery_voltage(void) {
         // Small delay between samples to allow ADC to settle
         sleep_us(100); // 100 microseconds delay
     }
+
+    // Disable SMPS PWM mode to return to high-efficiency PFM mode
+    gpio_put(SMPS_MODE_PIN, 0);
 
     // Calculate average ADC reading
     uint16_t adc_avg = adc_sum / VOLTAGE_SAMPLE_COUNT;
@@ -372,6 +380,11 @@ int main()
     // Initialise LED
     gpio_init(LED_PIN);
     gpio_set_dir(LED_PIN, GPIO_OUT);
+
+    // Initialize SMPS mode pin and set to PFM mode (high efficiency) by default
+    gpio_init(SMPS_MODE_PIN);
+    gpio_set_dir(SMPS_MODE_PIN, GPIO_OUT);
+    gpio_put(SMPS_MODE_PIN, 0);
 
     // Initialise all PWM channels
     init_all_pwm_channels();
